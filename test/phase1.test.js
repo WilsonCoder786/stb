@@ -1,5 +1,6 @@
 process.env.JWT_SECRET = 'test-secret-key-for-phase1';
 process.env.PAYMENT_WEBHOOK_SECRET = 'test-webhook-secret';
+process.env.SENSOR_API_KEY = 'test-sensor-api-key';
 process.env.NODE_ENV = 'test';
 
 const { describe, it, before, after } = require('node:test');
@@ -149,6 +150,51 @@ describe('Phase 1 API', { concurrency: false }, () => {
       .set(auth())
       .send({ archived: false });
     assert.equal(restored.body.horse.archived, false);
+  });
+
+  it('records water sensor readings and returns latest/history to authorized users', async () => {
+    const recordedAt = '2026-11-05T10:00:00.000Z';
+    const denied = await request(app)
+      .post('/api/v1/sensor/readings')
+      .set('x-sensor-api-key', 'wrong-key')
+      .send({ horseId, waterConsumedLiters: 2 });
+    assert.equal(denied.status, 401);
+
+    const invalid = await request(app)
+      .post('/api/v1/sensor/readings')
+      .set('x-sensor-api-key', 'test-sensor-api-key')
+      .send({ horseId, waterConsumedLiters: -1 });
+    assert.equal(invalid.status, 422);
+
+    const first = await request(app)
+      .post('/api/v1/sensor/readings')
+      .set('x-sensor-api-key', 'test-sensor-api-key')
+      .send({ horseId, waterConsumedLiters: 2.5, recordedAt });
+    assert.equal(first.status, 201);
+    assert.equal(first.body.reading.waterConsumedLiters, 2.5);
+    assert.equal(first.body.reading.horseId, horseId);
+
+    const second = await request(app)
+      .post('/api/v1/sensor/readings')
+      .set('x-sensor-api-key', 'test-sensor-api-key')
+      .send({ horseId, waterConsumedLiters: 1.25, recordedAt: '2026-11-05T11:00:00.000Z' });
+    assert.equal(second.status, 201);
+
+    const unauthenticated = await request(app).get(`/api/v1/horses/${horseId}/sensor-readings`);
+    assert.equal(unauthenticated.status, 401);
+
+    const readings = await request(app)
+      .get(`/api/v1/horses/${horseId}/sensor-readings?limit=10`)
+      .set(auth());
+    assert.equal(readings.status, 200);
+    assert.equal(readings.body.readings.length, 2);
+    assert.equal(readings.body.readings[0].waterConsumedLiters, 1.25);
+
+    const latest = await request(app)
+      .get(`/api/v1/horses/${horseId}/sensor-readings/latest`)
+      .set(auth());
+    assert.equal(latest.status, 200);
+    assert.equal(latest.body.reading.waterConsumedLiters, 1.25);
   });
 
   it('records notes, care, and an exportable report on the profile', async () => {

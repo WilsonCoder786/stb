@@ -16,6 +16,7 @@ const alertRoutes = require('./routes/alerts');
 const settingsRoutes = require('./routes/settings');
 const subscriptionRoutes = require('./routes/subscription');
 const webhookRoutes = require('./routes/webhooks');
+const sensorReadingRoutes = require('./routes/sensorReadings');
 
 const app = express();
 
@@ -32,6 +33,7 @@ app.get('/health', (_req, res) => {
 
 app.use('/api/v1/auth', authRoutes);
 app.get('/api/v1/me', authenticate, me);
+app.use('/api/v1', sensorReadingRoutes);
 app.use('/api/v1/horses', horseRoutes);
 app.use('/api/v1/users', userRoutes);
 app.use('/api/v1/alerts', alertRoutes);

@@ -3,6 +3,7 @@ const Horse = require('../models/Horse');
 const LogNote = require('../models/LogNote');
 const CareEntry = require('../models/CareEntry');
 const Alert = require('../models/Alert');
+const { canAccessHorse } = require('../utils/horseAccess');
 
 const sendValidationError = (res, errors) =>
   res.status(422).json({ success: false, errors: errors.array() });
@@ -13,14 +14,6 @@ const sendValidationError = (res, errors) =>
  * Checks if the requesting user can access a given horseId.
  * view_only: only allowed horses; others: any horse in same barn.
  */
-const canAccessHorse = (user, horse) => {
-  if (horse.barnId.toString() !== user.barnId.toString()) return false;
-  if (user.role === 'view_only') {
-    return user.allowedHorseIds.map(String).includes(horse._id.toString());
-  }
-  return true;
-};
-
 // ─── Horse CRUD ───────────────────────────────────────────────────────────────
 
 /**
