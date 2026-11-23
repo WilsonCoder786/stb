@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Stable Vitals API",
-    "description": "# Stable Vitals API\n\nPhase 1 barn API, including water sensor readings. Sensor hardware is not required to run the backend.\n\n## Run the collection\n1. Start the API with `npm start`.\n2. Import this collection and the **Stable Vitals — Local** environment.\n3. Select that environment.\n4. Open Collection Runner and run from top to bottom.\n\nSignup stores the owner token. Password reset, near the end, verifies a one-time code and then logs in again. Creating a horse, alert, invite, or checkout stores the id used by the next request. Logout is last and checks that the token was revoked.\n\n## Sensor readings\nSet `SENSOR_API_KEY` in the server `.env` and set the matching `sensorApiKey` in the Postman environment. A device sends `POST /api/v1/sensor/readings` with `x-sensor-api-key` and JSON `{ \"horseId\": \"...\", \"waterConsumedLiters\": 2.5, \"recordedAt\": \"2026-11-05T10:00:00.000Z\" }`. `recordedAt` is optional; water consumed is in liters since the previous reading. The app reads history from `GET /api/v1/horses/:id/sensor-readings?limit=50` and latest from `GET /api/v1/horses/:id/sensor-readings/latest` using its bearer token. Use HTTPS and keep the sensor key secret in production.\n\n## Roles\n- `all_access` — owner. Horses, team, billing, and settings.\n- `basic_access` — notes, care, alerts, and settings.\n- `view_only` — only horses in `allowedHorseIds`.\n\n## Payment\nCheckout stays pending until `POST /api/v1/webhooks/payment` arrives with the `x-webhook-secret` header.\nUse `payment.succeeded` or `payment.failed`.",
+    "description": "# Stable Vitals API\n\nPhase 1 barn API, including water sensor readings. Sensor hardware is not required to run the backend.\n\n## Run the collection\n1. Start the API with `npm start`.\n2. Import this collection and the **Stable Vitals — Local** environment.\n3. Select that environment.\n4. Open Collection Runner and run from top to bottom.\n\nSignup stores the owner token. Password reset, near the end, verifies a one-time code and then logs in again. Creating a horse, alert, invite, or checkout stores the id used by the next request. Logout is last and checks that the token was revoked.\n\n## Sensor readings\nSet `SENSOR_API_KEY` in the server `.env` and set the matching `sensorApiKey` in the Postman environment. A device sends `POST /api/v1/sensor/readings` with `x-sensor-api-key` and JSON `{ \"horseId\": \"...\", \"waterConsumedLiters\": 2.5, \"recordedAt\": \"2026-11-05T10:00:00.000Z\" }`. `recordedAt` is optional; water consumed is in liters since the previous reading. The app reads history from `GET /api/v1/horses/:id/sensor-readings?limit=50` and latest from `GET /api/v1/horses/:id/sensor-readings/latest` using its bearer token. Use HTTPS and keep the sensor key secret in production.\n\n## Roles\n- `all_access` — owner. Horses, team, billing, and settings.\n- `basic_access` — notes, care, alerts, and settings.\n- `view_only` — only horses in `allowedHorseIds`.\n\n## Payment\nThe barn staff plan and each horse are separate subscriptions.\n`GET /api/v1/subscription/plans` is the price sheet. Set `MONTHLY_PRICE` and `YEARLY_PRICE` in dollars. The barn and each horse use that same price.\nWithout Stripe keys, checkout stays pending until `POST /api/v1/webhooks/payment` with `x-webhook-secret`.\nWith `STRIPE_SECRET_KEY`, checkout creates that monthly or yearly subscription and returns a payment sheet (`customerId`, `ephemeralKey`, `paymentIntentClientSecret`). It does not open a Stripe Checkout page and does not use pre-set product price ids.\nThe barn plan covers all staff. A horse uses the barn's monthly or yearly plan and does not cover any other horse.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -316,6 +316,8 @@
                   "  pm.response.to.have.status(201);",
                   "  const horse = pm.response.json().horse;",
                   "  pm.expect(horse.sensorId).to.eql('SV-0012');",
+                  "  pm.expect(horse.subscription).to.eql('none');",
+                  "  pm.expect(horse.monitoringEnabled).to.eql(false);",
                   "  pm.collectionVariables.set('horseId', horse._id);",
                   "});"
                 ]
@@ -616,6 +618,150 @@
                 "exec": [
                   "pm.test(\"Status 200\", function () {",
                   "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Buy barn plan",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plan\": \"monthly\",\n  \"cardLast4\": \"4242\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/subscription/checkout",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "subscription", "checkout"]
+            },
+            "description": "Staff plan for the whole barn. Covers all staff. Does not subscribe horses. Quantity is one plan, not a horse count."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Barn checkout is pending', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.subscription.covers).to.eql('All staff');",
+                  "  pm.collectionVariables.set('checkoutId', body.checkout.checkoutId);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm barn plan",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "x-webhook-secret", "value": "{{webhookSecret}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"checkoutId\": \"{{checkoutId}}\",\n  \"event\": \"payment.succeeded\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks/payment",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "webhooks", "payment"]
+            },
+            "description": "Activates the barn staff plan only."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Barn plan is active', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().subscription.status).to.eql('active');",
+                  "  pm.expect(pm.response.json().subscription.covers).to.eql('All staff');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Subscribe this horse",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cardLast4\": \"1881\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/subscription/horses/{{horseId}}/checkout",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "subscription", "horses", "{{horseId}}", "checkout"]
+            },
+            "description": "One horse. Uses the barn plan. Renews the same way when the horse subscription is expired."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Horse checkout uses the barn plan', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.checkout.plan).to.eql('monthly');",
+                  "  pm.collectionVariables.set('checkoutId', body.checkout.checkoutId);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm this horse",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "x-webhook-secret", "value": "{{webhookSecret}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"checkoutId\": \"{{checkoutId}}\",\n  \"event\": \"payment.succeeded\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks/payment",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "webhooks", "payment"]
+            },
+            "description": "Sets this horse to active and turns monitoring on. Other horses stay unpaid."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Horse subscription is active', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().horse.subscription).to.eql('active');",
+                  "  pm.expect(pm.response.json().horse.monitoringEnabled).to.eql(true);",
                   "});"
                 ]
               }
@@ -1731,7 +1877,7 @@
     },
     {
       "name": "Subscription",
-      "description": "all_access only. Checkout does not activate the plan. The payment webhook does.",
+      "description": "Barn staff plan and per-horse subscriptions. Checkout does not activate anything. The payment webhook or Stripe webhook does. The barn plan covers all staff and does not subscribe horses.",
       "item": [
         {
           "name": "Current plan",
@@ -1912,6 +2058,7 @@
                   "  pm.expect(subscription.status).to.eql('active');",
                   "  pm.expect(subscription.plan).to.eql('monthly');",
                   "  pm.expect(subscription.cardLast4).to.eql('4242');",
+                  "  pm.expect(subscription.covers).to.eql('All staff');",
                   "});"
                 ]
               }

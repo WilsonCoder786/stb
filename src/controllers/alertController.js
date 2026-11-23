@@ -1,6 +1,7 @@
 const { validationResult } = require('express-validator');
 const Alert = require('../models/Alert');
 const Horse = require('../models/Horse');
+const { settleHorses, denyUnlessActive } = require('../services/billing');
 
 const sendValidationError = (res, errors) =>
   res.status(422).json({ success: false, errors: errors.array() });
@@ -34,6 +35,7 @@ const createAlert = async (req, res, next) => {
     if (!canAccessHorseById(req.user, horse._id)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const alert = await Alert.create({
       barnId: req.user.barnId,
@@ -56,10 +58,19 @@ const createAlert = async (req, res, next) => {
  */
 const listAlerts = async (req, res, next) => {
   try {
-    const filter = { barnId: req.user.barnId };
+    const horses = await Horse.find({ barnId: req.user.barnId }).select('_id subscription renewsAt monitoringEnabled').lean();
+    await settleHorses(horses);
+    const activeIds = horses
+      .filter((horse) => horse.subscription === 'active')
+      .map((horse) => horse._id);
+
+    const filter = { barnId: req.user.barnId, horseId: { $in: activeIds } };
 
     if (req.user.role === 'view_only') {
-      filter.horseId = { $in: req.user.allowedHorseIds };
+      const allowed = new Set(req.user.allowedHorseIds.map(String));
+      filter.horseId = {
+        $in: activeIds.filter((id) => allowed.has(String(id))),
+      };
     }
 
     if (req.query.state) {
@@ -79,6 +90,11 @@ const listAlerts = async (req, res, next) => {
       if (req.user.role === 'view_only' && !canAccessHorseById(req.user, hid)) {
         return res.status(403).json({ success: false, message: 'Access denied' });
       }
+      const horse = await Horse.findOne({ _id: hid, barnId: req.user.barnId });
+      if (!horse) {
+        return res.status(404).json({ success: false, message: 'Horse not found' });
+      }
+      if (await denyUnlessActive(res, horse)) return;
       filter.horseId = hid;
     }
 
@@ -112,6 +128,14 @@ const getAlert = async (req, res, next) => {
     if (!canAccessHorseById(req.user, alert.horseId._id || alert.horseId)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
+    const horse = await Horse.findOne({
+      _id: alert.horseId._id || alert.horseId,
+      barnId: req.user.barnId,
+    });
+    if (!horse || (await denyUnlessActive(res, horse))) {
+      if (!horse) return res.status(404).json({ success: false, message: 'Horse not found' });
+      return;
+    }
 
     return res.status(200).json({ success: true, alert });
   } catch (err) {
@@ -136,6 +160,11 @@ const acknowledgeAlert = async (req, res, next) => {
 
     if (!canAccessHorseById(req.user, alert.horseId)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const horse = await Horse.findOne({ _id: alert.horseId, barnId: req.user.barnId });
+    if (!horse || (await denyUnlessActive(res, horse))) {
+      if (!horse) return res.status(404).json({ success: false, message: 'Horse not found' });
+      return;
     }
 
     if (alert.state !== 'open') {
@@ -176,6 +205,11 @@ const resolveAlert = async (req, res, next) => {
 
     if (!canAccessHorseById(req.user, alert.horseId)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const horse = await Horse.findOne({ _id: alert.horseId, barnId: req.user.barnId });
+    if (!horse || (await denyUnlessActive(res, horse))) {
+      if (!horse) return res.status(404).json({ success: false, message: 'Horse not found' });
+      return;
     }
 
     if (alert.state === 'resolved') {

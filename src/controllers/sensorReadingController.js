@@ -2,6 +2,7 @@ const { validationResult } = require('express-validator');
 const Horse = require('../models/Horse');
 const SensorReading = require('../models/SensorReading');
 const { canAccessHorse } = require('../utils/horseAccess');
+const { denyUnlessActive } = require('../services/billing');
 
 const sendValidationError = (res, errors) =>
   res.status(422).json({ success: false, errors: errors.array() });
@@ -15,6 +16,7 @@ const recordSensorReading = async (req, res, next) => {
     if (!horse) {
       return res.status(404).json({ success: false, message: 'Horse not found' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const reading = await SensorReading.create({
       barnId: horse.barnId,
@@ -38,6 +40,7 @@ const getSensorReadings = async (req, res, next) => {
     if (!horse || !canAccessHorse(req.user, horse)) {
       return res.status(404).json({ success: false, message: 'Horse not found or access denied' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const readings = await SensorReading.find({
       horseId: horse._id,
@@ -62,6 +65,7 @@ const getLatestSensorReading = async (req, res, next) => {
     if (!horse || !canAccessHorse(req.user, horse)) {
       return res.status(404).json({ success: false, message: 'Horse not found or access denied' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const reading = await SensorReading.findOne({
       horseId: horse._id,

@@ -4,6 +4,7 @@ const LogNote = require('../models/LogNote');
 const CareEntry = require('../models/CareEntry');
 const Alert = require('../models/Alert');
 const { canAccessHorse } = require('../utils/horseAccess');
+const { settleHorse, settleHorses, denyUnlessActive } = require('../services/billing');
 
 const sendValidationError = (res, errors) =>
   res.status(422).json({ success: false, errors: errors.array() });
@@ -37,6 +38,7 @@ const listHorses = async (req, res, next) => {
     }
 
     const horses = await Horse.find(filter).sort({ aisle: 1, stall: 1, name: 1 }).lean();
+    await settleHorses(horses);
     return res.status(200).json({ success: true, horses });
   } catch (err) {
     next(err);
@@ -79,6 +81,8 @@ const createHorse = async (req, res, next) => {
       urgentNoDrinkHours: urgentNoDrinkHours !== undefined ? urgentNoDrinkHours : 8,
       highWaterPercent: highWaterPercent !== undefined ? highWaterPercent : 35,
       hoursWithoutDrink: hoursWithoutDrink !== undefined ? hoursWithoutDrink : 6,
+      subscription: 'none',
+      monitoringEnabled: false,
     });
 
     return res.status(201).json({ success: true, horse });
@@ -99,6 +103,7 @@ const getHorse = async (req, res, next) => {
     if (!canAccessHorse(req.user, horse)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
+    await settleHorse(horse);
 
     const [noteCount, careEntryCount, openAlertCount] = await Promise.all([
       LogNote.countDocuments({ horseId: horse._id, barnId: req.user.barnId }),
@@ -237,6 +242,7 @@ const updateMonitoring = async (req, res, next) => {
     if (!horse) {
       return res.status(404).json({ success: false, message: 'Horse not found' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const monitoringFields = [
       'monitoringEnabled', 'waterTarget', 'waterTargetRange',
@@ -263,6 +269,7 @@ const approveBaseline = async (req, res, next) => {
     if (!horse) {
       return res.status(404).json({ success: false, message: 'Horse not found' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     horse.baselineApproved = true;
     await horse.save();
@@ -284,6 +291,7 @@ const getLogNotes = async (req, res, next) => {
     if (!horse || !canAccessHorse(req.user, horse)) {
       return res.status(404).json({ success: false, message: 'Horse not found or access denied' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const notes = await LogNote.find({ horseId: req.params.id, barnId: req.user.barnId })
       .sort({ createdAt: -1 })
@@ -308,6 +316,7 @@ const addLogNote = async (req, res, next) => {
     if (!horse || !canAccessHorse(req.user, horse)) {
       return res.status(404).json({ success: false, message: 'Horse not found or access denied' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const note = await LogNote.create({
       barnId: req.user.barnId,
@@ -334,6 +343,7 @@ const getCareEntries = async (req, res, next) => {
     if (!horse || !canAccessHorse(req.user, horse)) {
       return res.status(404).json({ success: false, message: 'Horse not found or access denied' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const filter = { horseId: req.params.id, barnId: req.user.barnId };
 
@@ -363,6 +373,7 @@ const addCareEntry = async (req, res, next) => {
     if (!horse || !canAccessHorse(req.user, horse)) {
       return res.status(404).json({ success: false, message: 'Horse not found or access denied' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const { category, item, amount, notes, at } = req.body;
 
@@ -393,6 +404,7 @@ const getCareReport = async (req, res, next) => {
     if (!horse || !canAccessHorse(req.user, horse)) {
       return res.status(404).json({ success: false, message: 'Horse not found or access denied' });
     }
+    if (await denyUnlessActive(res, horse)) return;
 
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);

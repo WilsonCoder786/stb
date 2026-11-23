@@ -33,10 +33,17 @@ const subscriptionSchema = new mongoose.Schema(
     lastCheckoutId: {
       type: String,
     },
+    stripeCustomerId: {
+      type: String,
+    },
+    stripeSubscriptionId: {
+      type: String,
+    },
   },
   { timestamps: true }
 );
 
 subscriptionSchema.index({ 'pendingCheckout.checkoutId': 1 });
+subscriptionSchema.index({ stripeSubscriptionId: 1 });
 
 module.exports = mongoose.model('Subscription', subscriptionSchema);

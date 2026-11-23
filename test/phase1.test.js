@@ -13,6 +13,7 @@ let replSet;
 let app;
 let token;
 let horseId;
+let unpaidHorseId;
 let alertId;
 let memberId;
 let memberPassword;
@@ -96,6 +97,18 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(res.body.barn.name, 'North Barn');
   });
 
+  it('returns the monthly and yearly plan sheet', async () => {
+    const res = await request(app).get('/api/v1/subscription/plans').set(auth());
+    assert.equal(res.status, 200);
+    assert.equal(res.body.barn.covers, 'All staff');
+    assert.equal(res.body.monthly.interval, 'month');
+    assert.equal(res.body.yearly.interval, 'year');
+    assert.equal(res.body.barn.monthly.price, res.body.horse.monthly.price);
+    assert.equal(res.body.barn.yearly.price, res.body.horse.yearly.price);
+    assert.equal(res.body.horse.covers, 'One horse');
+    assert.equal(res.body.currency, 'usd');
+  });
+
   it('creates, edits, moves, and archives a horse', async () => {
     const created = await request(app).post('/api/v1/horses').set(auth()).send({
       name: 'Star',
@@ -106,6 +119,8 @@ describe('Phase 1 API', { concurrency: false }, () => {
     });
     assert.equal(created.status, 201);
     assert.equal(created.body.horse.sensorId, 'SV-0012');
+    assert.equal(created.body.horse.subscription, 'none');
+    assert.equal(created.body.horse.monitoringEnabled, false);
     horseId = created.body.horse._id;
 
     const other = await request(app).post('/api/v1/auth/signup').send({
@@ -150,6 +165,112 @@ describe('Phase 1 API', { concurrency: false }, () => {
       .set(auth())
       .send({ archived: false });
     assert.equal(restored.body.horse.archived, false);
+  });
+
+  const confirmPayment = (checkoutId, event = 'payment.succeeded') =>
+    request(app)
+      .post('/api/v1/webhooks/payment')
+      .set('x-webhook-secret', 'test-webhook-secret')
+      .send({ checkoutId, event });
+
+  it('blocks invites and horse features until each subscription is paid', async () => {
+    const invite = await request(app).post('/api/v1/users/invite').set(auth()).send({
+      name: 'Early Staff',
+      email: 'early@example.com',
+      role: 'basic_access',
+    });
+    assert.equal(invite.status, 402);
+    assert.equal(invite.body.message, 'Buy the barn subscription');
+
+    const horseCheckout = await request(app)
+      .post(`/api/v1/subscription/horses/${horseId}/checkout`)
+      .set(auth())
+      .send({ cardLast4: '4242' });
+    assert.equal(horseCheckout.status, 402);
+    assert.equal(horseCheckout.body.message, 'Buy the barn subscription');
+
+    const profile = await request(app).get(`/api/v1/horses/${horseId}`).set(auth());
+    assert.equal(profile.status, 200);
+    assert.equal(profile.body.horse.subscription, 'none');
+
+    const notes = await request(app).get(`/api/v1/horses/${horseId}/log-notes`).set(auth());
+    assert.equal(notes.status, 402);
+    assert.equal(notes.body.message, 'Sensor not connected');
+  });
+
+  it('sells the barn plan without subscribing horses', async () => {
+    const current = await request(app).get('/api/v1/subscription').set(auth());
+    assert.equal(current.status, 200);
+    assert.equal(current.body.subscription.status, 'none');
+    assert.equal(current.body.subscription.covers, 'All staff');
+
+    const checkout = await request(app).post('/api/v1/subscription/checkout').set(auth()).send({
+      plan: 'monthly',
+      cardLast4: '4242',
+    });
+    assert.equal(checkout.status, 200);
+    assert.equal(checkout.body.checkout.status, 'pending');
+    const checkoutId = checkout.body.checkout.checkoutId;
+
+    const denied = await request(app).post('/api/v1/webhooks/payment').send({
+      checkoutId,
+      event: 'payment.succeeded',
+    });
+    assert.equal(denied.status, 401);
+
+    const paid = await confirmPayment(checkoutId);
+    assert.equal(paid.status, 200);
+    assert.equal(paid.body.subscription.status, 'active');
+    assert.equal(paid.body.subscription.plan, 'monthly');
+    assert.equal(paid.body.subscription.cardLast4, '4242');
+    assert.equal(paid.body.subscription.covers, 'All staff');
+    assert.ok(paid.body.subscription.renewsAt);
+
+    const again = await confirmPayment(checkoutId);
+    assert.equal(again.status, 200);
+    assert.equal(again.body.subscription.status, 'active');
+
+    const horse = await request(app).get(`/api/v1/horses/${horseId}`).set(auth());
+    assert.equal(horse.body.horse.subscription, 'none');
+    assert.equal(horse.body.horse.monitoringEnabled, false);
+  });
+
+  it('subscribes only the horse that was paid', async () => {
+    const other = await request(app).post('/api/v1/horses').set(auth()).send({
+      name: 'Unpaid',
+      stall: '3',
+    });
+    unpaidHorseId = other.body.horse._id;
+    assert.equal(other.body.horse.subscription, 'none');
+
+    const wrongPlan = await request(app)
+      .post(`/api/v1/subscription/horses/${horseId}/checkout`)
+      .set(auth())
+      .send({ cardLast4: '4242', plan: 'yearly' });
+    assert.equal(wrongPlan.status, 422);
+
+    const checkout = await request(app)
+      .post(`/api/v1/subscription/horses/${horseId}/checkout`)
+      .set(auth())
+      .send({ cardLast4: '1881' });
+    assert.equal(checkout.status, 200);
+    assert.equal(checkout.body.checkout.plan, 'monthly');
+    assert.equal(checkout.body.checkout.horseId, horseId);
+
+    const paid = await confirmPayment(checkout.body.checkout.checkoutId);
+    assert.equal(paid.status, 200);
+    assert.equal(paid.body.horse.subscription, 'active');
+    assert.equal(paid.body.horse.monitoringEnabled, true);
+
+    const unpaid = await request(app).get(`/api/v1/horses/${unpaidHorseId}`).set(auth());
+    assert.equal(unpaid.body.horse.subscription, 'none');
+    assert.equal(unpaid.body.horse.monitoringEnabled, false);
+
+    const dash = await request(app).get('/api/v1/dashboard').set(auth());
+    assert.equal(dash.status, 200);
+    assert.ok(dash.body.onTrack.some((horse) => horse._id === horseId));
+    assert.ok(dash.body.needsSubscription.some((horse) => horse._id === unpaidHorseId));
+    assert.equal(dash.body.urgent.some((horse) => horse._id === unpaidHorseId), false);
   });
 
   it('records water sensor readings and returns latest/history to authorized users', async () => {
@@ -257,24 +378,13 @@ describe('Phase 1 API', { concurrency: false }, () => {
     assert.equal(read.body.settings.checkSensitivity, 'more');
   });
 
-  it('sells a plan only after the payment webhook confirms it', async () => {
-    const current = await request(app).get('/api/v1/subscription').set(auth());
-    assert.equal(current.status, 200);
-    assert.equal(current.body.subscription.status, 'none');
-
+  it('changes the barn plan without changing horse subscriptions', async () => {
     const checkout = await request(app).post('/api/v1/subscription/checkout').set(auth()).send({
-      plan: 'monthly',
+      plan: 'yearly',
       cardLast4: '4242',
     });
     assert.equal(checkout.status, 200);
-    assert.equal(checkout.body.checkout.status, 'pending');
     const checkoutId = checkout.body.checkout.checkoutId;
-
-    const denied = await request(app).post('/api/v1/webhooks/payment').send({
-      checkoutId,
-      event: 'payment.succeeded',
-    });
-    assert.equal(denied.status, 401);
 
     const paid = await request(app)
       .post('/api/v1/webhooks/payment')
@@ -282,16 +392,19 @@ describe('Phase 1 API', { concurrency: false }, () => {
       .send({ checkoutId, event: 'payment.succeeded' });
     assert.equal(paid.status, 200);
     assert.equal(paid.body.subscription.status, 'active');
-    assert.equal(paid.body.subscription.plan, 'monthly');
-    assert.equal(paid.body.subscription.cardLast4, '4242');
-    assert.ok(paid.body.subscription.renewsAt);
+    assert.equal(paid.body.subscription.plan, 'yearly');
+    assert.equal(paid.body.subscription.covers, 'All staff');
 
-    const again = await request(app)
+    const late = await request(app)
       .post('/api/v1/webhooks/payment')
       .set('x-webhook-secret', 'test-webhook-secret')
-      .send({ checkoutId, event: 'payment.succeeded' });
-    assert.equal(again.status, 200);
-    assert.equal(again.body.subscription.status, 'active');
+      .send({ checkoutId, event: 'payment.failed' });
+    assert.equal(late.status, 409);
+
+    const horse = await request(app).get(`/api/v1/horses/${horseId}`).set(auth());
+    assert.equal(horse.body.horse.subscription, 'active');
+    const unpaid = await request(app).get(`/api/v1/horses/${unpaidHorseId}`).set(auth());
+    assert.equal(unpaid.body.horse.subscription, 'none');
   });
 
   it('creates, acknowledges, and resolves a manual alert', async () => {
@@ -476,6 +589,207 @@ describe('Phase 1 API', { concurrency: false }, () => {
     });
     assert.equal(fresh.status, 200);
     token = fresh.body.token;
+  });
+
+  it('expires the barn and the horse when the paid period ends', async () => {
+    const signup = await request(app).post('/api/v1/auth/signup').send({
+      name: 'Cara Owner',
+      email: 'cara@example.com',
+      password: 'password123',
+      barnName: 'West Barn',
+    });
+    assert.equal(signup.status, 201);
+    const cara = signup.body.token;
+
+    const barnCheckout = await request(app).post('/api/v1/subscription/checkout').set(auth(cara)).send({
+      plan: 'monthly',
+      cardLast4: '4242',
+    });
+    await request(app)
+      .post('/api/v1/webhooks/payment')
+      .set('x-webhook-secret', 'test-webhook-secret')
+      .send({ checkoutId: barnCheckout.body.checkout.checkoutId, event: 'payment.succeeded' });
+
+    const horse = await request(app).post('/api/v1/horses').set(auth(cara)).send({
+      name: 'Willow',
+      stall: '2',
+    });
+    const willowId = horse.body.horse._id;
+    const horseCheckout = await request(app)
+      .post(`/api/v1/subscription/horses/${willowId}/checkout`)
+      .set(auth(cara))
+      .send({ cardLast4: '4242' });
+    await request(app)
+      .post('/api/v1/webhooks/payment')
+      .set('x-webhook-secret', 'test-webhook-secret')
+      .send({ checkoutId: horseCheckout.body.checkout.checkoutId, event: 'payment.succeeded' });
+
+    const Subscription = require('../src/models/Subscription');
+    const Horse = require('../src/models/Horse');
+    const past = new Date(Date.now() - 60 * 1000);
+    await Subscription.updateOne({ barnId: signup.body.barn._id }, { renewsAt: past });
+    await Horse.updateOne({ _id: willowId }, { renewsAt: past });
+
+    const current = await request(app).get('/api/v1/subscription').set(auth(cara));
+    assert.equal(current.body.subscription.status, 'missed');
+
+    const invite = await request(app).post('/api/v1/users/invite').set(auth(cara)).send({
+      name: 'Late Staff',
+      email: 'late@example.com',
+      role: 'basic_access',
+    });
+    assert.equal(invite.status, 402);
+
+    const profile = await request(app).get(`/api/v1/horses/${willowId}`).set(auth(cara));
+    assert.equal(profile.status, 200);
+    assert.equal(profile.body.horse.subscription, 'expired');
+    assert.equal(profile.body.horse.monitoringEnabled, false);
+
+    const report = await request(app).get(`/api/v1/horses/${willowId}/care-report`).set(auth(cara));
+    assert.equal(report.status, 402);
+    assert.equal(report.body.message, 'Subscription expired');
+
+    const renew = await request(app)
+      .post(`/api/v1/subscription/horses/${willowId}/checkout`)
+      .set(auth(cara))
+      .send({ cardLast4: '4242' });
+    assert.equal(renew.status, 402);
+  });
+
+  it('applies Stripe checkout and subscription events', async () => {
+    process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_secret';
+    const stripe = require('stripe')('sk_test_construct_only');
+    const signup = await request(app).post('/api/v1/auth/signup').send({
+      name: 'Dee Owner',
+      email: 'dee@example.com',
+      password: 'password123',
+      barnName: 'East Barn',
+    });
+    const dee = signup.body.token;
+    const horse = await request(app).post('/api/v1/horses').set(auth(dee)).send({
+      name: 'Nova',
+      stall: '6',
+    });
+    const novaId = horse.body.horse._id;
+
+    const barnCheckout = await request(app).post('/api/v1/subscription/checkout').set(auth(dee)).send({
+      plan: 'monthly',
+      cardLast4: '4242',
+    });
+    const barnCheckoutId = barnCheckout.body.checkout.checkoutId;
+
+    const postStripe = async (event) => {
+      const payload = JSON.stringify(event);
+      const header = stripe.webhooks.generateTestHeaderString({
+        payload,
+        secret: process.env.STRIPE_WEBHOOK_SECRET,
+      });
+      return request(app)
+        .post('/api/v1/webhooks/stripe')
+        .set('Content-Type', 'application/json')
+        .set('stripe-signature', header)
+        .send(payload);
+    };
+
+    const bad = await request(app)
+      .post('/api/v1/webhooks/stripe')
+      .set('Content-Type', 'application/json')
+      .set('stripe-signature', 't=1,v1=bad')
+      .send('{}');
+    assert.equal(bad.status, 400);
+
+    const paid = await postStripe({
+      id: 'evt_barn_paid',
+      object: 'event',
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: barnCheckoutId,
+          object: 'checkout.session',
+          mode: 'subscription',
+          payment_status: 'paid',
+          customer: 'cus_barn',
+          subscription: 'sub_barn',
+          metadata: { kind: 'barn', barnId: signup.body.barn._id, horseId: '', plan: 'monthly' },
+        },
+      },
+    });
+    assert.equal(paid.status, 200);
+
+    const current = await request(app).get('/api/v1/subscription').set(auth(dee));
+    assert.equal(current.body.subscription.status, 'active');
+    assert.equal(current.body.subscription.covers, 'All staff');
+    const stillUnpaid = await request(app).get(`/api/v1/horses/${novaId}`).set(auth(dee));
+    assert.equal(stillUnpaid.body.horse.subscription, 'none');
+
+    const horseCheckout = await request(app)
+      .post(`/api/v1/subscription/horses/${novaId}/checkout`)
+      .set(auth(dee))
+      .send({ cardLast4: '1881' });
+    const horsePaid = await postStripe({
+      id: 'evt_horse_paid',
+      object: 'event',
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: horseCheckout.body.checkout.checkoutId,
+          object: 'checkout.session',
+          mode: 'subscription',
+          payment_status: 'paid',
+          customer: 'cus_horse',
+          subscription: 'sub_horse',
+          metadata: {
+            kind: 'horse',
+            barnId: signup.body.barn._id,
+            horseId: novaId,
+            plan: 'monthly',
+          },
+        },
+      },
+    });
+    assert.equal(horsePaid.status, 200);
+    const nova = await request(app).get(`/api/v1/horses/${novaId}`).set(auth(dee));
+    assert.equal(nova.body.horse.subscription, 'active');
+    assert.equal(nova.body.horse.monitoringEnabled, true);
+
+    const missed = await postStripe({
+      id: 'evt_barn_missed',
+      object: 'event',
+      type: 'customer.subscription.updated',
+      data: {
+        object: {
+          id: 'sub_barn',
+          object: 'subscription',
+          status: 'past_due',
+          customer: 'cus_barn',
+          metadata: { kind: 'barn', barnId: String(signup.body.barn._id), plan: 'monthly' },
+        },
+      },
+    });
+    assert.equal(missed.status, 200);
+    const barnAfter = await request(app).get('/api/v1/subscription').set(auth(dee));
+    assert.equal(barnAfter.body.subscription.status, 'missed');
+    const horseStill = await request(app).get(`/api/v1/horses/${novaId}`).set(auth(dee));
+    assert.equal(horseStill.body.horse.subscription, 'active');
+
+    const expired = await postStripe({
+      id: 'evt_horse_expired',
+      object: 'event',
+      type: 'customer.subscription.deleted',
+      data: {
+        object: {
+          id: 'sub_horse',
+          object: 'subscription',
+          status: 'canceled',
+          customer: 'cus_horse',
+          metadata: { kind: 'horse', barnId: String(signup.body.barn._id), horseId: novaId, plan: 'monthly' },
+        },
+      },
+    });
+    assert.equal(expired.status, 200);
+    const novaAfter = await request(app).get(`/api/v1/horses/${novaId}`).set(auth(dee));
+    assert.equal(novaAfter.body.horse.subscription, 'expired');
+    assert.equal(novaAfter.body.horse.monitoringEnabled, false);
   });
 
   it('revokes the token on logout', async () => {

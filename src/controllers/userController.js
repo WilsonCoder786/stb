@@ -3,6 +3,7 @@ const { validationResult } = require('express-validator');
 const User = require('../models/User');
 const Barn = require('../models/Barn');
 const Horse = require('../models/Horse');
+const { settleBarnByBarnId, COVERS } = require('../services/billing');
 
 const sendValidationError = (res, errors) =>
   res.status(422).json({ success: false, errors: errors.array() });
@@ -23,7 +24,16 @@ const listUsers = async (req, res, next) => {
     const users = await User.find({ barnId: req.user.barnId })
       .select('-passwordHash')
       .lean();
-    return res.status(200).json({ success: true, users });
+    const subscription = await settleBarnByBarnId(req.user.barnId);
+    return res.status(200).json({
+      success: true,
+      users,
+      subscription: {
+        status: subscription ? subscription.status : 'none',
+        plan: subscription && subscription.plan ? subscription.plan : null,
+        covers: COVERS,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -50,6 +60,11 @@ const inviteUser = async (req, res, next) => {
         success: false,
         message: 'One or more horses are not in this barn',
       });
+    }
+
+    const subscription = await settleBarnByBarnId(req.user.barnId);
+    if (!subscription || subscription.status !== 'active') {
+      return res.status(402).json({ success: false, message: 'Buy the barn subscription' });
     }
 
     const temporaryPassword = crypto.randomBytes(12).toString('base64url');

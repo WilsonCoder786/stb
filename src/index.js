@@ -17,10 +17,13 @@ const settingsRoutes = require('./routes/settings');
 const subscriptionRoutes = require('./routes/subscription');
 const webhookRoutes = require('./routes/webhooks');
 const sensorReadingRoutes = require('./routes/sensorReadings');
+const dashboardRoutes = require('./routes/dashboard');
+const { stripeWebhook } = require('./controllers/subscriptionController');
 
 const app = express();
 
 app.use(cors());
+app.post('/api/v1/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhook);
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
@@ -40,6 +43,7 @@ app.use('/api/v1/alerts', alertRoutes);
 app.use('/api/v1/settings', settingsRoutes);
 app.use('/api/v1/subscription', subscriptionRoutes);
 app.use('/api/v1/webhooks', webhookRoutes);
+app.use('/api/v1/dashboard', dashboardRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

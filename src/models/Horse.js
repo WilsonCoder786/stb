@@ -57,12 +57,34 @@ const horseSchema = new mongoose.Schema(
     },
     monitoringEnabled: {
       type: Boolean,
-      default: true,
+      default: false,
     },
     subscription: {
       type: String,
       enum: ['none', 'active', 'expired'],
-      default: 'active',
+      default: 'none',
+    },
+    renewsAt: {
+      type: Date,
+    },
+    cardLast4: {
+      type: String,
+      trim: true,
+      maxlength: 4,
+    },
+    stripeCustomerId: {
+      type: String,
+    },
+    stripeSubscriptionId: {
+      type: String,
+    },
+    lastCheckoutId: {
+      type: String,
+    },
+    pendingCheckout: {
+      checkoutId: { type: String },
+      plan: { type: String, enum: ['monthly', 'yearly'] },
+      cardLast4: { type: String, maxlength: 4 },
     },
     baselineApproved: {
       type: Boolean,
@@ -102,5 +124,8 @@ const horseSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+horseSchema.index({ 'pendingCheckout.checkoutId': 1 });
+horseSchema.index({ stripeSubscriptionId: 1 });
 
 module.exports = mongoose.model('Horse', horseSchema);
